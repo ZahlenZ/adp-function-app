@@ -1,0 +1,362 @@
+trigger:
+  branches:
+    include:
+      - hotfix/*
+      - feature/*
+      - dev
+      - stage
+      - main
+
+name: $(Build.Repository.Name)_$(Year:yy).$(Month).$(DayOfMonth).$(BuildID)_$(SourceBranchName)
+
+variables:
+  system.debug: true
+  vmImageName: 'ubuntu-latest'
+  workingDirectory: '$(System.DefaultWorkingDirectory)/src'
+  pythonVersion: '3.9'
+
+
+stages:
+  # Confirmation that any branch being merged into Dev/Stage/Main is tested and successfully builds
+  # SUPER ROBUSTNESS: Could implement ARM manager template to deploy necesarry resources and deploy
+  # run tests on this deployment and then delete it out
+
+  - stage: 'BRANCH_POLICY'
+    condition: or(eq(variables['Build.Reason'], 'PullRequest')
+                  ,and(eq(variables['Build.Reason'], 'IndividualCI'), startswith(variables['Build.SourceBranch'], 'refs/heads/hotfix/'))
+                  ,and(eq(variables['Build.Reason'], 'IndividualCI'), startswith(variables['Build.SourceBranch'], 'refs/heads/feature/'))
+                  ) # activate for Build Dependency and commits to topic branches
+    displayName: 'Repo Policy Enforcement' 
+
+    pool:
+      vmImage: '$(vmImageName)'
+
+    jobs:
+      - job: 'TEST'
+        displayName: 'Test Suite'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+              architecture: 'x64'
+            displayName: 'Use Python $(pythonVersion)'
+
+          - bash: |
+              pip install --upgrade pip
+              pip install pytest pytest-azurepipelines pytest-cov unittest-xml-reporting
+              pip install -r src/requirements.txt
+            displayName: 'Test Dependencies'
+
+          # run test and create results
+          # System.DefaultWorkingDirectory (/home/vsts/work/1/s)
+          # --cov-report goes to SystemDefault/coverage.xml
+          - bash: |
+              pytest --junitxml=junit/TEST-results.xml --cov=src --cov-report=xml --cov=src --cov-report=html
+            env: # coldist-integrations-sandbox app registration credentials
+              AZURE_CLIENT_ID: '$(AZURE_CLIENT_ID)'
+              AZURE_CLIENT_SECRET: '$(AZURE_CLIENT_SECRET)'
+              AZURE_TENANT_ID: '$(AZURE_TENANT_ID)'
+              KeyVault: '$(KEYVAULT)'
+              APPINSIGHTS_INSTRUMENTATIONKEY: '$(APPINSIGHTS_INSTRUMENTATIONKEY)'
+            failOnStderr: true
+            displayName: 'Unit and Integration Tests'
+
+          - task: PublishCodeCoverageResults@1
+            condition: SucceededOrFailed()
+            inputs:
+              codeCoverageTool: Cobertura
+              summaryFileLocation: '/home/vsts/work/1/s/coverage.xml'
+              pathToSources: '$(System.DefaultWorkingDirectory)/src/'
+            displayName: 'Publish Code Coverage Results'
+
+      - job: 'BUILD'
+        displayName: 'Build Confirmation'
+        dependsOn: 'TEST'
+        steps:
+          - bash: |
+              if [ -f extensions.csproj ]
+              then
+                  dotnet build extensions.csproj --runtime ubuntu.16.04-x64 --output ./bin
+              fi
+            workingDirectory: '$(workingDirectory)'
+            displayName: 'Build Extensions'
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python $(pythonVersion)'
+
+          - bash: |
+              pip install --target="./.python_packages/lib/site-packages" -r ./requirements.txt
+            workingDirectory: '$(workingDirectory)'
+            displayName: 'Install Application Dependencies'
+
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(workingDirectory)'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildID).zip'
+              replaceExistingArchive: true
+
+          - task: PublishbuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(Build.buildID).zip'
+              artifactName: '$(Build.buildID)_drop'
+            displayName: 'Publish Dev Artifact'
+
+  # Create an artifact candidate for Release to dev Environment
+  - stage: 'PUBLISH_DEV_ARTIFACT'
+    displayName: 'Create Dev Artifact'
+    condition: and(eq(variables['Build.Reason'], 'IndividualCI'), 
+                   eq(variables['Build.SourceBranch'], 'refs/heads/dev')) # only activate on new commit to dev branch
+    
+    pool:
+      vmImage: '$(vmImageName)'
+    
+    jobs:
+      - job: 'TEST'
+        displayName: 'Test Suite'
+
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+              architecture: 'x64'
+            displayName: 'Use Python $(pythonVersion)'
+          
+          - bash: |
+              pip install --upgrade pip
+              pip install pytest pytest-azurepipelines pytest-cov unittest-xml-reporting
+              pip install -r src/requirements.txt
+            displayName: 'Test Dependencies'
+          
+          # run test and create results
+          # System.DefaultWorkingDirectory (/home/vsts/work/1/s)
+          # --cov-report goes to SystemDefault/coverage.xml
+          - bash: |
+              pytest --junitxml=junit/TEST-results.xml --cov=src --cov-report=xml --cov=src --cov-report=html
+            env: # coldist-integrations-sandbox app registration credentials
+              AZURE_CLIENT_ID: '$(AZURE_CLIENT_ID)'
+              AZURE_CLIENT_SECRET: '$(AZURE_CLIENT_SECRET)'
+              AZURE_TENANT_ID: '$(AZURE_TENANT_ID)'
+              KeyVault: '$(KEYVAULT)'
+              APPINSIGHTS_INSTRUMENTATIONKEY: '$(APPINSIGHTS_INSTRUMENTATIONKEY)'
+            failOnStderr: true
+            displayName: 'Unit and Integration Tests'
+
+          - task: PublishCodeCoverageResults@1
+            condition: SucceededOrFailed()
+            inputs:
+              codeCoverageTool: Cobertura
+              summaryFileLocation: '/home/vsts/work/1/s/coverage.xml'
+              pathToSources: '$(System.DefaultWorkingDirectory)/src/'
+            displayName: 'Publish Code Coverage Results'
+
+      - job: 'BUILD'
+        displayName: 'Build Confirmation'
+        dependsOn: 'TEST'
+        steps:
+          - bash: |
+              if [ -f extensions.csproj ]
+              then
+                  dotnet build extensions.csproj --runtime ubuntu.16.04-x64 --output ./bin
+              fi
+            workingDirectory: '$(workingDirectory)'
+            displayName: 'Compile Application Dependencies'
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python $(pythonVersion)'
+
+          - bash: |
+              pip install --target="./.python_packages/lib/site-packages" -r ./requirements.txt
+            workingDirectory: '$(workingDirectory)'
+            displayName: 'Install Application Dependencies'
+
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(workingDirectory)'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildID).zip'
+              replaceExistingArchive: true
+
+          - task: PublishbuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(Build.buildID).zip'
+              artifactName: '$(Build.buildID)_drop'
+            displayName: 'Publish Dev Artifact'
+  
+  # Create an artifact candidate for Release to stage/uat Environment
+  - stage: 'PUBLISH_STAGE_ARTIFACT'
+    condition: and(eq(variables['Build.Reason'], 'IndividualCI'),
+                   eq(variables['Build.SourceBranch'], 'refs/heads/stage')) # only activate on new commit to stage branch
+    displayName: 'Create Stage/UAT Artifact'
+
+    pool:
+      vmImage: '$(vmImageName)'
+
+    jobs:
+      - job: 'TEST'
+        displayName: 'Test Suite'
+
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+              architecture: 'x64'
+            displayName: 'Use Python $(pythonVersion)'
+          
+          - bash: |
+              pip install --upgrade pip
+              pip install pytest pytest-azurepipelines pytest-cov unittest-xml-reporting
+              pip install -r src/requirements.txt
+            displayName: 'Test Dependencies'
+          
+          # run test and create results
+          # System.DefaultWorkingDirectory (/home/vsts/work/1/s)
+          # --cov-report goes to SystemDefault/coverage.xml
+          - bash: |
+              pytest --junitxml=junit/TEST-results.xml --cov=src --cov-report=xml --cov=src --cov-report=html
+            env: # coldist-integrations-sandbox app registration credentials
+              AZURE_CLIENT_ID: '$(AZURE_CLIENT_ID)'
+              AZURE_CLIENT_SECRET: '$(AZURE_CLIENT_SECRET)'
+              AZURE_TENANT_ID: '$(AZURE_TENANT_ID)'
+              KeyVault: '$(KEYVAULT)'
+              APPINSIGHTS_INSTRUMENTATIONKEY: '$(APPINSIGHTS_INSTRUMENTATIONKEY)'
+            failOnStderr: true
+            displayName: 'Unit and Integration Tests'
+
+          - task: PublishCodeCoverageResults@1
+            condition: SucceededOrFailed()
+            inputs:
+              codeCoverageTool: Cobertura
+              summaryFileLocation: '/home/vsts/work/1/s/coverage.xml'
+              pathToSources: '$(System.DefaultWorkingDirectory)/src/'
+            displayName: 'Publish Code Coverage Results'
+
+      - job: 'BUILD'
+        displayName: 'Build Confirmation'
+        dependsOn: 'TEST'
+        steps:
+          - bash: |
+              if [ -f extensions.csproj ]
+              then
+                  dotnet build extensions.csproj --runtime ubuntu.16.04-x64 --output ./bin
+              fi
+            workingDirectory: '$(workingDirectory)'
+            displayName: 'Compile Application Dependencies'
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python $(pythonVersion)'
+
+          - bash: |
+              pip install --target="./.python_packages/lib/site-packages" -r ./requirements.txt
+            workingDirectory: '$(workingDirectory)'
+            displayName: 'Install Application Dependencies'
+
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(workingDirectory)'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildID).zip'
+              replaceExistingArchive: true
+
+          - task: PublishbuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(Build.buildID).zip'
+              artifactName: '$(Build.buildID)_drop'
+            displayName: 'Publish Dev Artifact'
+
+  # Create an artifact candidate for Release to prod Environment
+  - stage: 'PUBLISH_PROD_ARTIFACT'
+    condition: and(eq(variables['Build.Reason'], 'IndividualCI'),
+                   eq(variables['Build.SourceBranch'], 'refs/heads/main')) # only activate on new commit to stage branch
+    displayName: 'Create Production Artifact'
+
+    pool:
+      vmImage: '$(vmImageName)'
+
+    jobs:
+      - job: 'TEST'
+        displayName: 'Test Suite'
+
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+              addToPath: true
+              architecture: 'x64'
+            displayName: 'Use Python $(pythonVersion)'
+          
+          - bash: |
+              pip install --upgrade pip
+              pip install pytest pytest-azurepipelines pytest-cov unittest-xml-reporting
+              pip install -r src/requirements.txt
+            displayName: 'Test Dependencies'
+          
+          # run test and create results
+          # System.DefaultWorkingDirectory (/home/vsts/work/1/s)
+          # --cov-report goes to SystemDefault/coverage.xml
+          - bash: |
+              pytest --junitxml=junit/TEST-results.xml --cov=src --cov-report=xml --cov=src --cov-report=html
+            env: # coldist-integrations-sandbox app registration credentials
+              AZURE_CLIENT_ID: '$(AZURE_CLIENT_ID)'
+              AZURE_CLIENT_SECRET: '$(AZURE_CLIENT_SECRET)'
+              AZURE_TENANT_ID: '$(AZURE_TENANT_ID)'
+              KeyVault: '$(KEYVAULT)'
+              APPINSIGHTS_INSTRUMENTATIONKEY: '$(APPINSIGHTS_INSTRUMENTATIONKEY)'
+            failOnStderr: true
+            displayName: 'Unit and Integration Tests'
+
+          - task: PublishCodeCoverageResults@1
+            condition: SucceededOrFailed()
+            inputs:
+              codeCoverageTool: Cobertura
+              summaryFileLocation: '/home/vsts/work/1/s/coverage.xml'
+              pathToSources: '$(System.DefaultWorkingDirectory)/src/'
+            displayName: 'Publish Code Coverage Results'
+
+      - job: 'BUILD'
+        displayName: 'Build Confirmation'
+        dependsOn: TEST
+        steps:
+          - bash: |
+              if [ -f extensions.csproj ]
+              then
+                  dotnet build extensions.csproj --runtime ubuntu.16.04-x64 --output ./bin
+              fi
+            workingDirectory: '$(workingDirectory)'
+            displayName: 'Compile Application Dependencies'
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: 'Use Python $(pythonVersion)'
+
+          - bash: |
+              pip install --target="./.python_packages/lib/site-packages" -r ./requirements.txt
+            workingDirectory: '$(workingDirectory)'
+            displayName: 'Install Application Dependencies'
+
+          - task: ArchiveFiles@2
+            inputs:
+              rootFolderOrFile: '$(workingDirectory)'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildID).zip'
+              replaceExistingArchive: true
+
+          - task: PublishbuildArtifacts@1
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/$(Build.buildID).zip'
+              artifactName: '$(Build.buildID)_drop'
+            displayName: 'Publish Dev Artifact'

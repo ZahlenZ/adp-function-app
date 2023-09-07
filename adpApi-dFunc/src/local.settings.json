@@ -1,0 +1,9 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "KeyVault": "integrationsKV-dev",
+    "APPINSIGHTS_INSTRUMENTATIONKEY": "77ae36bf-a770-45c2-87d0-44f62e615db5"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "version": "2.0",
+  "logging": {
+    "logLevel": {
+      "Host.Results": "Error",
+      "Function": "Warning",
+      "Host.Triggers.DurableTask": "Warning",
+      "Host.Function.Console": "Debug"
+    },
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": true,
+        "excludedTypes": "Request"
+      }
+    }
+  },
+  "extensionBundle": {
+    "id": "Microsoft.Azure.Functions.ExtensionBundle",
+    "version": "[3.*, 4.0.0)"
+  },
+  "extensions": {
+    "durableTask": {
+      "storageProvider": {
+        "type": "AzureStorage"
+      }
+    }
+  }
+}
